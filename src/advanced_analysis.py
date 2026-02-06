@@ -1,7 +1,3 @@
-"""
-Análise avançada de partidas de futebol com rastreamento de jogadores e bola.
-"""
-
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -18,7 +14,7 @@ class AdvancedFootballAnalyzer:
     - Estatísticas de movimento
     """
     
-    def __init__(self, model_path="yolov8n.pt"):
+    def __init__(self, model_path="/home/paulo/Documentos/novo_projeto/poc-analyze-ia/yolo26m.pt"):
         self.model = YOLO(model_path)
         self.ball_trail = deque(maxlen=20)
         self.player_trails = {}
@@ -239,7 +235,7 @@ class AdvancedFootballAnalyzer:
 if __name__ == "__main__":
     analyzer = AdvancedFootballAnalyzer()
     
-    video_file = "/home/paulo/Documentos/novo_projeto/poc-analyze-ia/videos/exemplo_futebol.mp4"
+    video_file = "/home/paulo/Documentos/novo_projeto/poc-analyze-ia/videos/bundesliga--matchday-20---all-highlights.mp4"
     output_file = "/home/paulo/Documentos/novo_projeto/poc-analyze-ia/videos/analise_avancada.mp4"
     
     analyzer.process_video_advanced(video_file, output_file)

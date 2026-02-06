@@ -21,10 +21,11 @@ def main():
     print("\nEscolha uma opção:\n")
     print("1. 📷 Usar câmera em tempo real")
     print("2. 🎬 Processar um arquivo de vídeo")
-    print("3. ⚙️  Ajustar configurações")
-    print("4. ℹ️  Sair\n")
+    print("3. ⚙️ Ajustar configurações")
+    print("4. 🧪 Treinar modelo customizado (avançado)")    
+    print("5. ℹ️ Sair\n")
     
-    choice = input("Digite sua escolha (1-4): ").strip()
+    choice = input("Digite sua escolha (1-5): ").strip()
     
     if choice == "1":
         # Usar câmera com configurações otimizadas
@@ -42,7 +43,7 @@ def main():
             print(f"Vídeo será salvo em: {output_path}")
         
         detector = FootballDetector(
-            model_path="yolo26m.pt",
+            model_path="/home/paulo/Documentos/novo_projeto/poc-analyze-ia/runs/detect/football_detector/weights/best.pt",
             conf_threshold=0.60
         )
         
@@ -73,8 +74,8 @@ def main():
         
         print("\n⏳ Carregando detector otimizado...")
         detector = FootballDetector(
-            model_path="yolo26m.pt",
-            conf_threshold=0.60
+            model_path="/home/paulo/Documentos/novo_projeto/poc-analyze-ia/runs/detect/football_detector/weights/best.pt",
+            conf_threshold=0.30
         )
         
         print("🎬 Processando vídeo com filtros de detecção...\n")
@@ -110,7 +111,29 @@ def main():
         )
         
         detector.process_camera(camera_id=0)
+    
+    elif choice == "4":
+        # Treinar modelo customizado
+        from train_custom_model import train_football_model
         
+        dataset_path = input("\nCaminho do dataset (pasta com data.yaml): ").strip()
+        
+        if not Path(dataset_path).exists():
+            print(f"❌ Caminho inválido: {dataset_path}")
+            return
+        
+        epochs_str = input("Número de épocas (padrão: 6): ").strip() or "6"
+        
+        try:
+            epochs = int(epochs_str)
+            if epochs <= 0:
+                raise ValueError()
+        except:
+            print("❌ Valor inválido")
+            return
+        
+        train_football_model(dataset_path, epochs, imgsz=640, batch_size=2, device=0)
+
     else:
         print("👋 Saindo...")
         return

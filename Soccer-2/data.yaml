@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 8
+names: ['0', 'ball', 'distract', 'keeper1', 'keeper2', 'referee', 'team1', 'team2']
+
+roboflow:
+  workspace: josias-werly-gmail-com
+  project: ball-0zqmb
+  version: 1
+  license: Public Domain
+  url: https://universe.roboflow.com/josias-werly-gmail-com/ball-0zqmb/dataset/1

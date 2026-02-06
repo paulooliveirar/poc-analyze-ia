@@ -14,19 +14,18 @@ class FootballDetector:
 
     # Definir classes customizadas para futebol
     FOOTBALL_CLASSES = {
-        32: "bola",
+        0: "bola",
         6: "jogador_time_1",
         7: "jogador_time_2",
         3: "arbitro",
         4: "goleiro",
-        5: "bandeirinha",
-        77: "bola_de_futebol"  # Classe extra para bola (se existir no modelo)
+        5: "bandeirinha"
     }
 
     # Cores para visualização (BGR)
     COLORS = {
         "bola": (0, 165, 255),  # Laranja
-        "jogador": (255, 0, 0),  # Azul
+        "jogador_time_1": (255, 0, 0),  # Azul
         "jogador_time_2": (0, 0, 255),  # Vermelho
         "arbitro": (0, 255, 0),  # Verde
         "goleiro": (255, 255, 0),  # Ciano
@@ -36,14 +35,14 @@ class FootballDetector:
     # Cores para texto dos labels (BGR)
     TEXT_COLORS = {
         "bola": (255, 255, 255),  # Branco
-        "jogador": (255, 255, 255),  # Branco
+        "jogador_time_1": (255, 255, 255),  # Branco
         "jogador_time_2": (255, 255, 255),  # Branco
         "arbitro": (0, 0, 0),  # Preto
         "goleiro": (0, 0, 0),  # Preto
         "bandeirinha": (255, 255, 255)  # Branco
     }
 
-    def __init__(self, model_path="yolo26m.pt", conf_threshold=0.60):
+    def __init__(self, model_path="yolo26n.pt", conf_threshold=0.60):
         """
         Inicializa o detector de futebol.
         
@@ -59,7 +58,7 @@ class FootballDetector:
         print("Modelo carregado com sucesso!")
 
         # Treinar com seu dataset 
-        self.model.train(data='/home/paulo/Documentos/novo_projeto/poc-analyze-ia/Soccer-1/data.yaml', epochs=6, imgsz=416, batch=4, device=0)
+        # self.model.train(data='/home/paulo/Documentos/novo_projeto/poc-analyze-ia/Soccer-1/data.yaml', epochs=6, imgsz=416, batch=4, device=0)
 
     def detect(self, frame):
         """
@@ -71,7 +70,7 @@ class FootballDetector:
         Returns:
             results: Resultados da detecção do YOLOv11
         """
-        results = self.model(frame, conf=self.conf_threshold, verbose=False, iou=1)
+        results = self.model.predict(frame, conf=self.conf_threshold, verbose=False, iou=1)
         return results
     
     def filter_detections(self, results):

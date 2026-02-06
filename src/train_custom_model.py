@@ -10,7 +10,7 @@ from ultralytics import YOLO
 import os
 
 
-def train_football_model(dataset_path=None, epochs=100, imgsz=640, batch_size=16):
+def train_football_model(dataset_path=None, epochs=100, imgsz=416, batch_size=4, device=0):
     """
     Treina um modelo YOLOv8 customizado para futebol.
     
@@ -19,6 +19,7 @@ def train_football_model(dataset_path=None, epochs=100, imgsz=640, batch_size=16
         epochs: Número de épocas de treinamento
         imgsz: Tamanho das imagens
         batch_size: Tamanho do batch
+        device: ID do dispositivo (GPU) para treinamento
     """
     
     if dataset_path is None:
@@ -73,7 +74,6 @@ def train_football_model(dataset_path=None, epochs=100, imgsz=640, batch_size=16
         patience=20,  # Early stopping
         save=True,
         device=0,  # GPU id (0) ou 'cpu'
-        project='runs/detect',
         name='football_detector',
         pretrained=True,
         optimizer='SGD',
