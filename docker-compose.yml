@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  football-analyzer:
+    build: .
+    container_name: football-analyzer
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]    
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - .:/app              # <– monta todo o projeto
+      - ./videos:/app/videos
+      - ./runs:/app/runs
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    shm_size: "8gb"
+    devices:
+      - "/dev/video0:/dev/video0"
+    privileged: true
+    stdin_open: true
+    tty: true    
+

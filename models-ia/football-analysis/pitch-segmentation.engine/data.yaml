@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 3
+names: ['cross_recipient_zone', 'crossing_player_zone', 'pitch']
+
+roboflow:
+  workspace: roboflow-jvuqo
+  project: football-pitch-segmentation
+  version: 2
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/roboflow-jvuqo/football-pitch-segmentation/dataset/2

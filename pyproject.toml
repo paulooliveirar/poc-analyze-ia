@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "football-analyzer"
+version = "0.1.0"
+description = "Sistema de análise tática de futebol em tempo real"
+readme = "example_spec.txt"
+requires-python = ">=3.11"
+dependencies = [
+  "ultralytics==8.4.12",
+  "numpy==1.26.4",
+  "torch==2.2.2",
+  "torchvision==0.17.2",
+  "pillow==11.1.0",
+  "matplotlib==3.8.0",
+  "supervision==0.22.0",
+  "roboflow==1.1.32",
+  "pytest==8.3.5",
+  "loguru==0.7.3",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["football_analyzer*"]

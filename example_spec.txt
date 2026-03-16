@@ -1,0 +1,36 @@
+# [NOME DA FEATURE OU TAREFA]
+
+## 1. Visão Geral
+*   **Descrição:** O que esta funcionalidade faz e por que é necessária?
+*   **Objetivo:** Qual o resultado esperado?
+*   **Contexto:** Onde isso se encaixa no sistema atual?
+
+## 2. Requisitos Funcionais (O que o sistema faz)
+*   [ ] REQ-01: O sistema deve...
+*   [ ] REQ-02: O usuário poderá...
+*   [ ] REQ-03: Regra de negócio (ex: usuário só pode... se...)
+
+## 3. Especificações Técnicas (Como o sistema faz)
+*   **Stack:** [React, Node.js, Python, etc.]
+*   **Componentes/Arquivos a criar:** `src/components/NovaFunc.tsx`, `src/api/novaFunc.ts`
+*   **Estrutura de Dados/Modelos:**
+    ```typescript
+    interface NovaFuncProps {
+      id: string;
+      ...
+    }
+    ```
+*   **API/Endpoints:** `POST /api/nova-func`
+
+## 4. UI/UX (Opcional - se houver front-end)
+*   **Descrição:** A interface deve ter um botão, um formulário, etc.
+*   **Estilo:** Usar Tailwind/CSS conforme convenções do projeto.
+
+## 5. Critérios de Aceite (Testes)
+*   [ ] Ao clicar no botão, a API deve ser chamada.
+*   [ ] Se a API retornar erro, mostrar mensagem "Erro ao salvar".
+*   [ ] O componente deve ser responsivo.
+
+## 6. Restrições e Tratamento de Erros
+*   [ ] Não aceitar campos vazios.
+*   [ ] O log de erros deve ir para o Sentry.

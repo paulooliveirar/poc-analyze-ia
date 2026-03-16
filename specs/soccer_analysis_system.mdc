@@ -1,0 +1,311 @@
+---
+alwaysApply: true
+---
+
+You are a senior Python computer vision engineer specialized in real-time sports analytics.
+
+Your task is to implement a **high-performance tactical football analysis system** using multiple YOLO models (Ultralytics), focused on **11-a-side football and professional 7-a-side football**.
+
+---
+
+# 1. System Overview
+
+Build a real-time football analysis system that processes:
+
+* Video files OR
+* Live webcam/stream input
+
+The system must:
+
+* Use **multiple specialized YOLO models**
+* Run in **parallel on GPU**
+* Be optimized for **low latency and high throughput**
+* Avoid hallucinations and false positives (strict filtering logic)
+
+---
+
+# 2. Model Training (Phase 1)
+
+All models must be trained independently using datasets hosted on **RunPod.io**.
+
+After training:
+
+* Export all models to **TensorRT (.engine)** format for production
+
+---
+
+## Required Models
+
+### Detection Models (YOLO - detect)
+
+* `player-referee-detection`: players and referees
+* `ball-detection`: optimized for high-speed ball tracking
+* `field-keypoints-detection`: pitch lines and keypoints
+
+### Segmentation Model (YOLO - segment)
+
+* `pitch-segmentation`: binary mask of the field
+
+### Pose Model (YOLO - pose)
+
+* `player-pose-estimation`: skeleton tracking
+
+---
+
+# 3. Parallel Processing Architecture (Phase 2)
+
+Implement an asynchronous **fan-out / fan-in pipeline**:
+
+---
+
+## Pipeline Flow
+
+### 1. Frame Ingestion (Thread 1)
+
+* Capture frames using OpenCV
+* High priority thread
+* Maintain FPS consistency
+
+---
+
+### 2. Dispatcher (Orchestrator)
+
+* Distribute each frame to parallel GPU workers
+
+---
+
+### 3. Parallel Execution (GPU Slots)
+
+Each frame must be processed simultaneously:
+
+* Slot A → Pitch Segmentation
+* Slot B → Player & Referee Detection
+* Slot C → Ball Tracking (with Kalman Filter)
+* Slot D → Pose Estimation (ONLY on player ROIs)
+
+---
+
+### 4. Aggregator (Final Thread)
+
+* Merge all outputs
+* Apply business rules
+* Render annotated frame
+
+---
+
+# 4. Business Logic & Visualization
+
+## Confidence Filtering (STRICT)
+
+* DO NOT display detections with confidence < 0.65
+
+---
+
+## Anti-Hallucination Rules
+
+* Filter detections by:
+
+  * minimum bounding box area
+  * aspect ratio (reject body parts)
+* Integrate second-stage classifier (full_player vs not_player)
+
+---
+
+## Ball Tracking Logic
+
+* Use Kalman Filter
+* If ball is missing:
+
+  * < 5 frames → interpolate
+  * ≥ 5 frames → label as "NOT DETECTED"
+
+---
+
+## Team Classification (K-Means)
+
+For each detected player:
+
+* Extract pixels inside bounding box
+* Apply K-Means clustering (k=2)
+* Assign dominant color
+
+Output:
+
+* Team A → Color 1 (e.g. red)
+* Team B → Color 2 (e.g. blue)
+* Referee → fixed color (black/gray)
+
+---
+
+## Visualization Rules
+
+* Players → bounding box + team color
+* Ball → high visibility color (yellow)
+* Referee → neutral color
+* Pose → overlay skeleton
+
+---
+
+# 5. Hard Negative Mining (MANDATORY)
+
+Implement automatic dataset improvement:
+
+* Any detection that:
+
+  * passes YOLO threshold
+  * but is rejected later
+
+→ must be saved as a hard negative
+
+---
+
+## Storage
+
+```
+dataset/
+  hard_negatives/
+```
+
+Also store:
+
+* bbox
+* frame_id
+* confidence
+
+---
+
+## Requirements
+
+* Avoid duplicates (IoU or hashing)
+* Enable/disable via config flag
+
+---
+
+# 6. Two-Stage Detection (MANDATORY)
+
+Pipeline must include:
+
+### Stage 1:
+
+* YOLO detection
+
+### Stage 2:
+
+* Crop bounding box
+* Run classifier:
+
+  * `full_player`
+  * `not_player`
+
+Use:
+
+* MobileNetV2 (lightweight)
+
+---
+
+# 7. Tech Stack
+
+* Python 3.11
+* Ultralytics YOLO (v8 or v11)
+* TensorRT (mandatory)
+* OpenCV
+* PyTorch
+* multiprocessing OR concurrent.futures
+* Loguru (logging)
+* pytest (testing)
+
+---
+
+# 8. Unit Tests
+
+Implement:
+
+* `test_gpu_availability`
+* `test_model_concurrency`
+* `test_team_classification`
+* `test_video_integrity`
+
+---
+
+# 9. Output
+
+On finish (SIGINT or EOF):
+
+### Video Output
+
+```
+/videos/result_TIMESTAMP.mp4
+```
+
+* Codec: mp4v or H.264
+
+---
+
+### Metadata Output (Optional)
+
+```
+/videos/result_TIMESTAMP.json
+```
+
+Include:
+
+* ball possession stats
+* player tracking info
+
+---
+
+# 10. Code Requirements
+
+* Modular architecture
+* Production-ready
+* GPU optimized
+* Clean and well documented
+* No shortcuts or mock implementations
+
+---
+
+# 11. Roboflow Model Recommendations
+
+Use these datasets/models (or similar) from Roboflow as baseline:
+
+### Player Detection
+
+* football-players-detection (high quality, widely used)
+* soccer-players-5 (good for small-sided games like football 7)
+
+### Ball Detection
+
+* football-ball-detection (optimized for motion blur)
+* soccer-ball-zoom (better for broadcast footage)
+
+### Field Detection
+
+* football-field-detection (keypoints + lines)
+* soccer-pitch-lines (useful for calibration)
+
+### Segmentation
+
+* football-pitch-segmentation (clean masks for filtering)
+
+### Pose
+
+* soccer-players-pose (if available, otherwise fine-tune YOLO pose)
+
+---
+
+Prefer datasets with:
+
+* broadcast footage
+* multiple camera angles
+* occlusion scenarios
+* motion blur examples
+
+---
+
+# IMPORTANT
+
+* Do NOT assume detections — always validate
+* Do NOT allow hallucinated players
+* Performance and correctness are equally critical
+
+Implement the full system end-to-end.
