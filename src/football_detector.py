@@ -111,6 +111,10 @@ class PipelineConfig:
     hard_negative_enabled: bool = True
     max_ball_missing_frames: int = 10
     player_match_radius: float = 60.0
+    camera_motion_min_distance: float = 5.0
+    speed_meter_per_pixel: float = 0.03
+    speed_smoothing_alpha: float = 0.25
+    offline_predict_batch_size: int = 8
 
 
 @dataclass
@@ -152,6 +156,12 @@ class RuntimeState:
     last_ball_state: str = "NOT DETECTED"
     current_owner_id: Optional[int] = None
     last_ball_center: Optional[tuple[int, int]] = None
+    prev_gray_frame: Optional[np.ndarray] = None
+    prev_features: Optional[np.ndarray] = None
+    accumulated_camera_shift: tuple[float, float] = (0.0, 0.0)
+    player_adjusted_position: dict[int, tuple[float, float]] = field(default_factory=dict)
+    player_speed_kmh: dict[int, float] = field(default_factory=dict)
+    player_distance_m: dict[int, float] = field(default_factory=dict)
 
 
 class HardNegativeMiner:
@@ -287,6 +297,7 @@ class FootballDetector:
             enabled=self.config.hard_negative_enabled,
         )
         self.tracking_backend = tracking_backend
+        self.current_fps = 30.0
         self._load_models()
 
     def _model_path(self, model_file: str, fallback: str) -> str:
@@ -415,6 +426,33 @@ class FootballDetector:
             "keypoints": self.executor.submit(self.keypoint_model.predict, frame, conf=self.config.conf_threshold, verbose=False),
         }
         return {slot: future.result()[0] for slot, future in futures.items()}
+
+    def _run_parallel_slots_batch(self, frames: list[np.ndarray]) -> list[dict[str, Any]]:
+        """
+        Executa predict em lote para vídeo offline, reduzindo overhead por frame.
+        """
+        if not frames:
+            return []
+        futures = {
+            "segment": self.executor.submit(self.segment_model.predict, frames, conf=self.config.conf_threshold, verbose=False),
+            "players": self.executor.submit(self.player_referee_model.predict, frames, conf=self.config.conf_threshold, verbose=False),
+            "ball": self.executor.submit(self.ball_model.predict, frames, conf=self.config.ball_conf_threshold, verbose=False),
+            "context": self.executor.submit(self.context_model.predict, frames, conf=self.config.ball_conf_threshold, verbose=False),
+            "keypoints": self.executor.submit(self.keypoint_model.predict, frames, conf=self.config.conf_threshold, verbose=False),
+        }
+        slot_results = {slot: future.result() for slot, future in futures.items()}
+        per_frame_slots: list[dict[str, Any]] = []
+        for idx in range(len(frames)):
+            per_frame_slots.append(
+                {
+                    "segment": slot_results["segment"][idx],
+                    "players": slot_results["players"][idx],
+                    "ball": slot_results["ball"][idx],
+                    "context": slot_results["context"][idx],
+                    "keypoints": slot_results["keypoints"][idx],
+                }
+            )
+        return per_frame_slots
 
     def _is_referee_label(self, label_name: str) -> bool:
         lowered = label_name.lower()
@@ -610,6 +648,137 @@ class FootballDetector:
             assigned.append(player)
         return assigned
 
+    def _estimate_camera_movement(self, frame: np.ndarray) -> tuple[float, float]:
+        """
+        Estima o movimento da câmera por fluxo óptico entre frames.
+        """
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.state.prev_gray_frame is None:
+            height, width = gray_frame.shape
+            mask = np.zeros_like(gray_frame)
+            edge_band = max(20, int(width * 0.08))
+            mask[:, :edge_band] = 255
+            mask[:, width - edge_band :] = 255
+            self.state.prev_features = cv2.goodFeaturesToTrack(
+                gray_frame,
+                maxCorners=100,
+                qualityLevel=0.3,
+                minDistance=3,
+                blockSize=7,
+                mask=mask,
+            )
+            self.state.prev_gray_frame = gray_frame
+            return (0.0, 0.0)
+
+        if self.state.prev_features is None or len(self.state.prev_features) == 0:
+            self.state.prev_features = cv2.goodFeaturesToTrack(
+                self.state.prev_gray_frame,
+                maxCorners=100,
+                qualityLevel=0.3,
+                minDistance=3,
+                blockSize=7,
+            )
+        if self.state.prev_features is None:
+            self.state.prev_gray_frame = gray_frame
+            return (0.0, 0.0)
+
+        new_features, status, _ = cv2.calcOpticalFlowPyrLK(
+            self.state.prev_gray_frame,
+            gray_frame,
+            self.state.prev_features,
+            None,
+            winSize=(15, 15),
+            maxLevel=2,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
+        )
+
+        if new_features is None or status is None:
+            self.state.prev_gray_frame = gray_frame
+            self.state.prev_features = cv2.goodFeaturesToTrack(
+                gray_frame,
+                maxCorners=100,
+                qualityLevel=0.3,
+                minDistance=3,
+                blockSize=7,
+            )
+            return (0.0, 0.0)
+
+        valid_new = new_features[status.flatten() == 1]
+        valid_old = self.state.prev_features[status.flatten() == 1]
+        if len(valid_new) == 0 or len(valid_old) == 0:
+            self.state.prev_gray_frame = gray_frame
+            self.state.prev_features = cv2.goodFeaturesToTrack(
+                gray_frame,
+                maxCorners=100,
+                qualityLevel=0.3,
+                minDistance=3,
+                blockSize=7,
+            )
+            return (0.0, 0.0)
+
+        deltas = valid_old.reshape(-1, 2) - valid_new.reshape(-1, 2)
+        norms = np.linalg.norm(deltas, axis=1)
+        best_idx = int(np.argmax(norms))
+        shift_x = float(deltas[best_idx][0])
+        shift_y = float(deltas[best_idx][1])
+        if float(norms[best_idx]) < self.config.camera_motion_min_distance:
+            shift_x, shift_y = 0.0, 0.0
+
+        acc_x = self.state.accumulated_camera_shift[0] + shift_x
+        acc_y = self.state.accumulated_camera_shift[1] + shift_y
+        self.state.accumulated_camera_shift = (acc_x, acc_y)
+        self.state.prev_gray_frame = gray_frame
+        self.state.prev_features = cv2.goodFeaturesToTrack(
+            gray_frame,
+            maxCorners=100,
+            qualityLevel=0.3,
+            minDistance=3,
+            blockSize=7,
+        )
+        return (shift_x, shift_y)
+
+    def _update_player_speeds(self, players: list[dict[str, Any]]) -> None:
+        """
+        Calcula velocidade do jogador compensando deslocamento da câmera.
+        """
+        if self.current_fps <= 0:
+            return
+        shift_x, shift_y = self.state.accumulated_camera_shift
+        for player in players:
+            track_id = int(player["track_id"])
+            x1, y1, x2, y2 = player["bbox"]
+            foot_x = float((x1 + x2) / 2.0) - shift_x
+            foot_y = float(y2) - shift_y
+            adjusted_position = (foot_x, foot_y)
+            previous_position = self.state.player_adjusted_position.get(track_id)
+
+            if previous_position is None:
+                self.state.player_speed_kmh[track_id] = 0.0
+                self.state.player_distance_m.setdefault(track_id, 0.0)
+            else:
+                distance_pixels = float(
+                    np.hypot(
+                        adjusted_position[0] - previous_position[0],
+                        adjusted_position[1] - previous_position[1],
+                    )
+                )
+                distance_meters = distance_pixels * self.config.speed_meter_per_pixel
+                speed_kmh_raw = distance_meters * self.current_fps * 3.6
+                # Evita picos irreais causados por oclusão/troca abrupta de bbox.
+                speed_kmh_raw = min(speed_kmh_raw, 40.0)
+                prev_speed = self.state.player_speed_kmh.get(track_id, speed_kmh_raw)
+                speed_kmh = (
+                    prev_speed * (1.0 - self.config.speed_smoothing_alpha)
+                    + speed_kmh_raw * self.config.speed_smoothing_alpha
+                )
+                self.state.player_speed_kmh[track_id] = float(speed_kmh)
+                prev_distance = self.state.player_distance_m.get(track_id, 0.0)
+                self.state.player_distance_m[track_id] = float(prev_distance + distance_meters)
+
+            self.state.player_adjusted_position[track_id] = adjusted_position
+            player["speed_kmh"] = float(self.state.player_speed_kmh.get(track_id, 0.0))
+            player["distance_m"] = float(self.state.player_distance_m.get(track_id, 0.0))
+
     def _run_pose_on_player_rois(self, frame: np.ndarray, players: list[dict[str, Any]]) -> list[np.ndarray]:
         if not players:
             return []
@@ -678,9 +847,11 @@ class FootballDetector:
             team_id = int(player.get("team_id", 0))
             color = TEAM_A_COLOR if team_id == 0 else TEAM_B_COLOR
             source_model = str(player.get("source_model", self.player_model_label))
+            speed_kmh = float(player.get("speed_kmh", 0.0))
+            distance_m = float(player.get("distance_m", 0.0))
             label = (
                 f"Jogador #{int(player['track_id'])} | Time {team_id} | "
-                f"{int(player['conf'] * 100)}% | {source_model}"
+                f"{int(player['conf'] * 100)}% | {speed_kmh:.1f}km/h | {distance_m:.1f}m | {source_model}"
             )
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, label, (x1, max(20, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
@@ -730,12 +901,28 @@ class FootballDetector:
         total = t0 + t1
         t0_pct = int((100 * t0 / total)) if total else 0
         t1_pct = 100 - t0_pct if total else 0
+        cam_x, cam_y = self.state.accumulated_camera_shift
         cv2.putText(frame, f"Posse Time A: {t0_pct}%", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, TEAM_A_COLOR, 2)
         cv2.putText(frame, f"Posse Time B: {t1_pct}%", (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.65, TEAM_B_COLOR, 2)
+        cv2.putText(
+            frame,
+            f"Mov Camera X:{cam_x:.1f} Y:{cam_y:.1f}",
+            (20, 125),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2,
+        )
         return frame
 
-    def _process_frame(self, frame: np.ndarray, frame_id: int) -> np.ndarray:
-        slots = self._run_parallel_slots(frame)
+    def _process_frame(
+        self,
+        frame: np.ndarray,
+        frame_id: int,
+        precomputed_slots: Optional[dict[str, Any]] = None,
+    ) -> np.ndarray:
+        self._estimate_camera_movement(frame)
+        slots = precomputed_slots if precomputed_slots is not None else self._run_parallel_slots(frame)
         players, referees = self._extract_players_and_referees(
             frame,
             slots["players"],
@@ -743,6 +930,7 @@ class FootballDetector:
             secondary_result=slots["context"],
         )
         players = self._assign_track_ids(players)
+        self._update_player_speeds(players)
         for player in players:
             team_id = self.team_classifier.classify(frame, player["bbox"])
             player["team_id"] = team_id
@@ -790,6 +978,14 @@ class FootballDetector:
             "player_tracking_info": self.state.player_tracking_info,
             "last_ball_state": self.state.last_ball_state,
             "current_ball_owner_id": self.state.current_owner_id,
+            "player_speed_kmh": self.state.player_speed_kmh,
+            "player_distance_m": self.state.player_distance_m,
+            "camera_movement": {
+                "accumulated_shift": [
+                    self.state.accumulated_camera_shift[0],
+                    self.state.accumulated_camera_shift[1],
+                ]
+            },
             "generated_at": datetime.now().isoformat(),
         }
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -800,11 +996,13 @@ class FootballDetector:
         output_path: str | None = None,
         display: bool = True,
         export_metadata: bool = True,
+        use_offline_batch_predict: bool = True,
     ) -> None:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Nao consegui abrir o video: {video_path}")
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        self.current_fps = float(fps)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -819,22 +1017,47 @@ class FootballDetector:
         show_window = effective_display(display)
         frame_id = 0
         try:
-            while True:
-                success, frame = cap.read()
-                if not success:
-                    break
-                frame_id += 1
-                processed = self._process_frame(frame, frame_id)
-                writer.write(processed)
-                if show_window:
-                    try:
-                        cv2.imshow("Analise Tatica Futebol", processed)
-                        if cv2.waitKey(1) & 0xFF == ord("q"):
+            if use_offline_batch_predict:
+                while True:
+                    batch_frames: list[np.ndarray] = []
+                    for _ in range(self.config.offline_predict_batch_size):
+                        success, frame = cap.read()
+                        if not success:
                             break
-                    except cv2.error:
-                        show_window = False
-                if frame_id % 30 == 0:
-                    logger.info("Processado %s/%s frames", frame_id, total_frames)
+                        batch_frames.append(frame)
+                    if not batch_frames:
+                        break
+                    batch_slots = self._run_parallel_slots_batch(batch_frames)
+                    for frame, slots in zip(batch_frames, batch_slots):
+                        frame_id += 1
+                        processed = self._process_frame(frame, frame_id, precomputed_slots=slots)
+                        writer.write(processed)
+                        if show_window:
+                            try:
+                                cv2.imshow("Analise Tatica Futebol", processed)
+                                if cv2.waitKey(1) & 0xFF == ord("q"):
+                                    break
+                            except cv2.error:
+                                show_window = False
+                        if frame_id % 30 == 0:
+                            logger.info("Processado %s/%s frames", frame_id, total_frames)
+            else:
+                while True:
+                    success, frame = cap.read()
+                    if not success:
+                        break
+                    frame_id += 1
+                    processed = self._process_frame(frame, frame_id)
+                    writer.write(processed)
+                    if show_window:
+                        try:
+                            cv2.imshow("Analise Tatica Futebol", processed)
+                            if cv2.waitKey(1) & 0xFF == ord("q"):
+                                break
+                        except cv2.error:
+                            show_window = False
+                    if frame_id % 30 == 0:
+                        logger.info("Processado %s/%s frames", frame_id, total_frames)
         except KeyboardInterrupt:
             logger.info("SIGINT recebido, finalizando com seguranca.")
         finally:
@@ -864,6 +1087,7 @@ class FootballDetector:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        self.current_fps = float(fps)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         target_output = Path(output_path) if output_path else self._timestamped_output_path()

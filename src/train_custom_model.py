@@ -9,9 +9,11 @@ Fase 1 da spec:
 from pathlib import Path
 import shutil
 import importlib.util
-from typing import Optional
+import argparse
+from typing import Any, Optional
 
 import torch
+import yaml
 from ultralytics import YOLO
 
 def train_football_model(
@@ -179,6 +181,289 @@ def _resolve_data_yaml(dataset_folder: Path) -> Path:
     return data_yaml
 
 
+def _resolve_training_device(device: int | str = "auto") -> int | str:
+    """
+    Resolve o device para treino, aceitando:
+    - auto  -> usa 0,1 se houver >=2 GPUs, senão 0
+    - cpu   -> força CPU
+    - 0     -> GPU única
+    - 0,1   -> multi-GPU (DDP no Ultralytics)
+    """
+    if isinstance(device, str) and device.lower() == "cpu":
+        return "cpu"
+
+    if not torch.cuda.is_available():
+        print("[AVISO] CUDA indisponível no ambiente. Usando CPU.")
+        return "cpu"
+
+    gpu_count = torch.cuda.device_count()
+    if device == "auto":
+        if gpu_count >= 2:
+            return "0,1"
+        return "0"
+
+    if isinstance(device, int):
+        if device < 0 or device >= gpu_count:
+            raise ValueError(
+                f"Device GPU inválido: {device}. GPUs disponíveis: 0..{gpu_count - 1}"
+            )
+        return device
+
+    if isinstance(device, str):
+        parts = [item.strip() for item in device.split(",") if item.strip()]
+        if not parts:
+            raise ValueError("Parâmetro de device vazio. Use 'auto', 'cpu', '0' ou '0,1'.")
+        for part in parts:
+            if not part.isdigit():
+                raise ValueError(f"Device inválido: {device}. Formato esperado: '0' ou '0,1'.")
+            gpu_id = int(part)
+            if gpu_id < 0 or gpu_id >= gpu_count:
+                raise ValueError(
+                    f"GPU {gpu_id} não existe. GPUs disponíveis: 0..{gpu_count - 1}"
+                )
+        return ",".join(parts)
+
+    raise ValueError(f"Tipo de device não suportado: {type(device)}")
+
+
+def _default_base_model_for_task(task: str) -> str:
+    if task == "segment":
+        return "yolo11m-seg.pt"
+    if task == "pose":
+        return "yolo11m-pose.pt"
+    if task == "obb":
+        return "yolov8n-obb.pt"
+    return "yolo11m.pt"
+
+
+def _augmentation_profile_for_task(task: str) -> dict[str, Any]:
+    """
+    Perfil de augmentations para robustez em cenário real:
+    zoom, baixa luz, blur/movimento, oclusão e variação de escala.
+    """
+    profile: dict[str, Any] = {
+        "hsv_h": 0.02,
+        "hsv_s": 0.75,
+        "hsv_v": 0.55,
+        "degrees": 7.5,
+        "translate": 0.10,
+        "scale": 0.45,
+        "shear": 2.0,
+        "perspective": 0.0008,
+        "fliplr": 0.5,
+        "mosaic": 1.0,
+        "mixup": 0.15,
+        "erasing": 0.4,
+    }
+    if task == "segment":
+        profile["copy_paste"] = 0.2
+    else:
+        profile["copy_paste"] = 0.0
+    return profile
+
+
+def _infer_task_from_dataset(dataset_folder: Path, config: dict[str, Any]) -> str:
+    folder_name = dataset_folder.name.lower()
+    if "kpt_shape" in config:
+        return "pose"
+    if "obb" in folder_name:
+        return "obb"
+    if "segmentation" in folder_name or "segment" in folder_name:
+        return "segment"
+    return "detect"
+
+
+def _has_train_split(data_yaml: Path, config: dict[str, Any]) -> bool:
+    train_ref = config.get("train")
+    if not train_ref:
+        return False
+    train_path = (data_yaml.parent / str(train_ref)).resolve()
+    return train_path.exists()
+
+
+def _discover_folder_training_profiles(base_dir: Path) -> list[dict[str, Any]]:
+    """
+    Descobre datasets em models-ia/football-analysis contendo data.yaml.
+    """
+    dataset_root = base_dir / "models-ia" / "football-analysis"
+    if not dataset_root.exists():
+        return []
+
+    custom_profiles: dict[str, dict[str, Any]] = {
+        "soccer.v2i.yolov11": {
+            "run_name": "player-referee-detection",
+            "task": "detect",
+            "base_model": "yolo11m.pt",
+            "imgsz": 960,
+            "batch": 16,
+            "patience": 35,
+            "lr0": 0.0025,
+            "lrf": 0.01,
+            "export_name": "player-referee-detection",
+        },
+        "soccer_ball_v1i_yolov11": {
+            "run_name": "ball-detection",
+            "task": "detect",
+            "base_model": "yolo11m.pt",
+            "imgsz": 1280,
+            "batch": 8,
+            "patience": 45,
+            "lr0": 0.0020,
+            "lrf": 0.01,
+            "export_name": "ball-detection",
+        },
+        "football-players-detection.v19-yolo11m.yolov8": {
+            "run_name": "players-detection-v19",
+            "task": "detect",
+            "base_model": "yolo11m.pt",
+            "imgsz": 960,
+            "batch": 16,
+            "patience": 35,
+            "lr0": 0.0025,
+            "lrf": 0.01,
+            "export_name": "players-detection-v19",
+        },
+        "pitch-segmentation.engine": {
+            "run_name": "pitch-segmentation",
+            "task": "segment",
+            "base_model": "yolo11m-seg.pt",
+            "imgsz": 1024,
+            "batch": 8,
+            "patience": 40,
+            "lr0": 0.0020,
+            "lrf": 0.01,
+            "export_name": "pitch-segmentation",
+        },
+        "field-keypoints-detection.engine": {
+            "run_name": "field-keypoints-detection",
+            "task": "pose",
+            "base_model": "yolo11m-pose.pt",
+            "imgsz": 960,
+            "batch": 8,
+            "patience": 40,
+            "lr0": 0.0020,
+            "lrf": 0.01,
+            "export_name": "field-keypoints-detection",
+        },
+        "soccer.v1i.yolov8-obb": {
+            "run_name": "players-ball-detection-obb",
+            "task": "obb",
+            "base_model": "yolov8n-obb.pt",
+            "imgsz": 960,
+            "batch": 16,
+            "patience": 35,
+            "lr0": 0.0025,
+            "lrf": 0.01,
+            "export_name": "players-ball-detection-obb",
+        },
+    }
+
+    profiles: list[dict[str, Any]] = []
+    for dataset_folder in sorted(dataset_root.iterdir()):
+        if not dataset_folder.is_dir():
+            continue
+        data_yaml = dataset_folder / "data.yaml"
+        if not data_yaml.exists():
+            continue
+
+        with data_yaml.open("r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+
+        if not _has_train_split(data_yaml, config):
+            print(f"[AVISO] Dataset sem split de treino válido, ignorando: {data_yaml}")
+            continue
+
+        base_profile = custom_profiles.get(dataset_folder.name, {})
+        inferred_task = _infer_task_from_dataset(dataset_folder, config)
+        task = base_profile.get("task", inferred_task)
+        run_name = base_profile.get(
+            "run_name", dataset_folder.name.replace(".", "-").replace("_", "-")
+        )
+        profile = {
+            "run_name": run_name,
+            "task": task,
+            "data_yaml": str(data_yaml),
+            "base_model": base_profile.get("base_model", _default_base_model_for_task(task)),
+            "imgsz": int(base_profile.get("imgsz", 960)),
+            "batch": int(base_profile.get("batch", 8)),
+            "patience": int(base_profile.get("patience", 35)),
+            "lr0": float(base_profile.get("lr0", 0.0025)),
+            "lrf": float(base_profile.get("lrf", 0.01)),
+            "export_name": base_profile.get("export_name", run_name),
+        }
+        profiles.append(profile)
+    return profiles
+
+
+def train_dataset_with_profile(
+    *,
+    data_yaml: str,
+    run_name: str,
+    task: str,
+    base_model: str,
+    epochs: int,
+    imgsz: int,
+    batch: int,
+    patience: int,
+    lr0: float,
+    lrf: float,
+    export_name: str,
+    device: int | str = "auto",
+) -> Optional[str]:
+    """
+    Treina um dataset único e exporta para TensorRT/ONNX.
+    """
+    base_dir = Path(__file__).resolve().parents[1]
+    data_yaml_path = Path(data_yaml).resolve()
+    if not data_yaml_path.exists():
+        print(f"[AVISO] data.yaml não encontrado: {data_yaml_path}")
+        return None
+
+    resolved_device = _resolve_training_device(device)
+    print(f"\n▶ Treinando {run_name} ({task})")
+    print(f"   data.yaml: {data_yaml_path}")
+    print(f"   base_model: {base_model}")
+    print(f"   device: {resolved_device}")
+
+    model = YOLO(base_model)
+    train_args = {
+        "data": str(data_yaml_path),
+        "epochs": epochs,
+        "imgsz": imgsz,
+        "batch": batch,
+        "device": resolved_device,
+        "name": run_name,
+        "task": task,
+        "pretrained": True,
+        "optimizer": "AdamW",
+        "cos_lr": True,
+        "warmup_epochs": 3,
+        "close_mosaic": 12,
+        "cache": True,
+        "amp": True,
+        "workers": 8,
+        "patience": patience,
+        "lr0": lr0,
+        "lrf": lrf,
+        **_augmentation_profile_for_task(task),
+    }
+    model.train(**train_args)
+
+    best_weights = base_dir / "runs" / task / run_name / "weights" / "best.pt"
+    if not best_weights.exists():
+        print(f"[ERRO] best.pt não encontrado para {run_name}: {best_weights}")
+        return None
+
+    exported_path = export_to_tensorrt(str(best_weights))
+    model_store = base_dir / "models-ia" / "football-analysis"
+    model_store.mkdir(parents=True, exist_ok=True)
+    suffix = Path(exported_path).suffix
+    target_path = model_store / f"{export_name}{suffix}"
+    shutil.copy2(exported_path, target_path)
+    print(f"Modelo copiado para: {target_path}")
+    return str(target_path)
+
+
 def _train_isolated_model(
     base_dir: Path,
     *,
@@ -193,6 +478,7 @@ def _train_isolated_model(
     lr0: float = 0.003,
     lrf: float = 0.01,
     export_name: str = "",
+    device: int | str = "auto",
 ) -> Optional[str]:
     """
     Treina um único modelo de forma isolada e exporta para .engine.
@@ -204,10 +490,11 @@ def _train_isolated_model(
         print(f"[AVISO] {exc}")
         return None
 
-    device = 0 if torch.cuda.is_available() else "cpu"
+    resolved_device = _resolve_training_device(device)
     print(f"\n▶ Treinando {run_name} ({task})")
     print(f"   dataset: {data_yaml}")
     print(f"   base_model: {base_model}")
+    print(f"   device: {resolved_device}")
 
     model = YOLO(base_model)
     model.train(
@@ -215,20 +502,21 @@ def _train_isolated_model(
         epochs=epochs,
         imgsz=imgsz,
         batch=batch,
-        device=device,
+        device=resolved_device,
         name=run_name,
         task=task,
         pretrained=True,
         optimizer="AdamW",
         cos_lr=True,
         warmup_epochs=3,
-        close_mosaic=10,
+        close_mosaic=12,
         cache=True,
         amp=True,
-        workers=4,
+        workers=8,
         patience=patience,
         lr0=lr0,
         lrf=lrf,
+        **_augmentation_profile_for_task(task),
     )
 
     best_weights = base_dir / "runs" / task / run_name / "weights" / "best.pt"
@@ -251,6 +539,7 @@ def _train_isolated_model(
 def train_spec_models(
     epochs: int = 50,
     early_stopping_patience: Optional[int] = None,
+    device: int | str = "auto",
 ) -> dict[str, Optional[str]]:
     """
     Implementa os treinamentos da spec (Fase 1), cada modelo de forma isolada.
@@ -334,8 +623,48 @@ def train_spec_models(
             lr0=item["lr0"],
             lrf=item["lrf"],
             export_name=item["export_name"],
+            device=device,
         )
         outputs[item["run_name"]] = engine_path
+    return outputs
+
+
+def train_all_folder_models(
+    epochs: int = 80,
+    early_stopping_patience: Optional[int] = None,
+    device: int | str = "auto",
+) -> dict[str, Optional[str]]:
+    """
+    Treina automaticamente todos os datasets encontrados em:
+    models-ia/football-analysis/**/data.yaml
+    """
+    base_dir = Path(__file__).resolve().parents[1]
+    profiles = _discover_folder_training_profiles(base_dir)
+    if not profiles:
+        print("[AVISO] Nenhum dataset com data.yaml válido foi encontrado.")
+        return {}
+
+    outputs: dict[str, Optional[str]] = {}
+    for profile in profiles:
+        result = train_dataset_with_profile(
+            data_yaml=profile["data_yaml"],
+            run_name=profile["run_name"],
+            task=profile["task"],
+            base_model=profile["base_model"],
+            epochs=epochs,
+            imgsz=profile["imgsz"],
+            batch=profile["batch"],
+            patience=(
+                early_stopping_patience
+                if early_stopping_patience is not None
+                else profile["patience"]
+            ),
+            lr0=profile["lr0"],
+            lrf=profile["lrf"],
+            export_name=profile["export_name"],
+            device=device,
+        )
+        outputs[profile["run_name"]] = result
     return outputs
 
 
@@ -379,18 +708,71 @@ def train_player_roles_verification(
 if __name__ == "__main__":
     import sys
 
-    # Uso principal deste módulo passa a ser via Makefile,
-    # mas mantemos uma CLI simples para compatibilidade.
-    print(sys.argv)
+    # Compatibilidade com chamadas antigas.
     if len(sys.argv) == 2 and sys.argv[1].isdigit():
-        # python -m src.train_custom_model 50 -> treino isolado conforme spec
         train_spec_models(epochs=int(sys.argv[1]))
-    elif len(sys.argv) == 2 and sys.argv[1] == "roles-verification":
-        # python -m src.train_custom_model roles-verification
+        sys.exit(0)
+    if len(sys.argv) == 2 and sys.argv[1] == "roles-verification":
         output = train_player_roles_verification()
         print(f"Saída do treino de verificação: {output}")
-    elif len(sys.argv) > 1:
-        dataset_path = sys.argv[1]
-        train_football_model(dataset_path=dataset_path)
+        sys.exit(0)
+
+    parser = argparse.ArgumentParser(
+        description="Treino de modelos de análise de futebol com suporte multi-GPU."
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    train_all_parser = subparsers.add_parser(
+        "train-folder", help="Treina todos os datasets válidos da pasta football-analysis."
+    )
+    train_all_parser.add_argument("--epochs", type=int, default=80)
+    train_all_parser.add_argument("--patience", type=int, default=0)
+    train_all_parser.add_argument("--device", type=str, default="auto")
+
+    train_one_parser = subparsers.add_parser(
+        "train-one", help="Treina um único dataset com parâmetros explícitos."
+    )
+    train_one_parser.add_argument("--data", type=str, required=True)
+    train_one_parser.add_argument("--run-name", type=str, required=True)
+    train_one_parser.add_argument("--task", type=str, default="detect", choices=["detect", "segment", "pose", "obb"])
+    train_one_parser.add_argument("--base-model", type=str, default="")
+    train_one_parser.add_argument("--epochs", type=int, default=80)
+    train_one_parser.add_argument("--imgsz", type=int, default=960)
+    train_one_parser.add_argument("--batch", type=int, default=8)
+    train_one_parser.add_argument("--patience", type=int, default=35)
+    train_one_parser.add_argument("--lr0", type=float, default=0.0025)
+    train_one_parser.add_argument("--lrf", type=float, default=0.01)
+    train_one_parser.add_argument("--export-name", type=str, default="")
+    train_one_parser.add_argument("--device", type=str, default="auto")
+
+    args = parser.parse_args()
+    if args.command == "train-folder":
+        patience_override = args.patience if args.patience > 0 else None
+        outputs = train_all_folder_models(
+            epochs=args.epochs,
+            early_stopping_patience=patience_override,
+            device=args.device,
+        )
+        print("\n✅ Treino em lote concluído.")
+        for model_name, output_path in outputs.items():
+            print(f"- {model_name}: {output_path}")
+    elif args.command == "train-one":
+        base_model = args.base_model or _default_base_model_for_task(args.task)
+        export_name = args.export_name or args.run_name
+        output = train_dataset_with_profile(
+            data_yaml=args.data,
+            run_name=args.run_name,
+            task=args.task,
+            base_model=base_model,
+            epochs=args.epochs,
+            imgsz=args.imgsz,
+            batch=args.batch,
+            patience=args.patience,
+            lr0=args.lr0,
+            lrf=args.lrf,
+            export_name=export_name,
+            device=args.device,
+        )
+        print(f"✅ Treino concluído: {output}")
     else:
         train_football_model()

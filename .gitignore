@@ -23,6 +23,7 @@ wheels/
 .installed.cfg
 *.egg
 dataset/*
+runs_backup/*
 
 # IDE
 .vscode/
